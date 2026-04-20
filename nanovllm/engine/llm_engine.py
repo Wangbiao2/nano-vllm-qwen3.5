@@ -10,6 +10,7 @@ from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.utils.image_processing import process_messages
 
 
 class LLMEngine:
@@ -19,6 +20,9 @@ class LLMEngine:
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
         Sequence.block_size = config.kvcache_block_size
+        self.image_token_id = config.image_token_id
+        self.vision_start_token_id = config.vision_start_token_id
+        self.vision_end_token_id = config.vision_end_token_id
         self.ps = []
         self.events = []
         ctx = mp.get_context("spawn")
@@ -40,10 +44,22 @@ class LLMEngine:
         for p in self.ps:
             p.join()
 
-    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
-        if isinstance(prompt, str):
-            prompt = self.tokenizer.encode(prompt)
-        seq = Sequence(prompt, sampling_params)
+    def add_request(self, prompt: str | list[int] | list[dict], sampling_params: SamplingParams):
+        if isinstance(prompt, list) and len(prompt) > 0 and isinstance(prompt[0], dict):
+            # Multimodal messages format
+            token_ids, pixel_values, image_grid_thw = process_messages(
+                prompt, self.tokenizer,
+                image_token_id=self.image_token_id,
+                vision_start_id=self.vision_start_token_id,
+                vision_end_id=self.vision_end_token_id,
+            )
+            seq = Sequence(token_ids, sampling_params)
+            seq.pixel_values = pixel_values
+            seq.image_grid_thw = image_grid_thw
+        else:
+            if isinstance(prompt, str):
+                prompt = self.tokenizer.encode(prompt)
+            seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
 
     def step(self):
@@ -59,7 +75,7 @@ class LLMEngine:
 
     def generate(
         self,
-        prompts: list[str] | list[list[int]],
+        prompts: list[str] | list[list[int]] | list[list[dict]],
         sampling_params: SamplingParams | list[SamplingParams],
         use_tqdm: bool = True,
     ) -> list[str]:

@@ -56,10 +56,10 @@ class BlockManager:
     def can_allocate(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= seq.num_blocks
 
-    def allocate(self, seq: Sequence):
+    def allocate(self, seq: Sequence, disable_prefix_cache: bool = False):
         assert not seq.block_table
         h = -1
-        cache_miss = False
+        cache_miss = False or disable_prefix_cache
         for i in range(seq.num_blocks):
             token_ids = seq.block(i)
             h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1

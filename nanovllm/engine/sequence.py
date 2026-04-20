@@ -25,9 +25,13 @@ class Sequence:
         self.num_cached_tokens = 0    # tokens that don't need prefill
         self.num_scheduled_tokens = 0
         self.block_table = []
+        self.state_slot_id = -1       # GDN state slot (-1 = not allocated)
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        # Multimodal data (consumed on first prefill, then cleared)
+        self.pixel_values = None       # torch.Tensor | None
+        self.image_grid_thw = None     # torch.Tensor | None
 
     def __len__(self):
         return self.num_tokens
@@ -70,13 +74,16 @@ class Sequence:
 
     def __getstate__(self):
         last_state = self.token_ids if self.num_completion_tokens == 0 or self.num_cached_tokens < self.num_tokens else self.last_token
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
+        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, self.state_slot_id, last_state)
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
+        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, self.state_slot_id, last_state = state
         if isinstance(last_state, list):
             self.token_ids = last_state
             self.last_token = self.token_ids[-1]
         else:
             self.token_ids = []
             self.last_token = last_state
+        # Attributes not serialized (only live on rank 0 / scheduler side)
+        self.pixel_values = None
+        self.image_grid_thw = None

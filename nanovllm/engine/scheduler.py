@@ -5,13 +5,31 @@ from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.block_manager import BlockManager
 
 
+class StateSlotManager:
+    """Simple free-list allocator for GDN recurrent/conv state slots."""
+
+    def __init__(self, num_slots: int):
+        self.free_slots: deque[int] = deque(range(num_slots))
+
+    def can_allocate(self) -> bool:
+        return len(self.free_slots) > 0
+
+    def allocate(self) -> int:
+        return self.free_slots.popleft()
+
+    def deallocate(self, slot_id: int):
+        self.free_slots.append(slot_id)
+
+
 class Scheduler:
 
     def __init__(self, config: Config):
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
+        self.is_hybrid = config.is_hybrid
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+        self.state_slot_manager = StateSlotManager(config.max_state_slots) if config.max_state_slots > 0 else None
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -32,10 +50,17 @@ class Scheduler:
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining == 0 or (not seq.block_table and not self.block_manager.can_allocate(seq)):    # no budget
                 break
+            # Check state slot availability for hybrid models
+            if self.state_slot_manager is not None and seq.state_slot_id == -1:
+                if not self.state_slot_manager.can_allocate():
+                    break
             if remaining < num_tokens and scheduled_seqs:    # only allow chunked prefill for the first seq
                 break
             if not seq.block_table:
-                self.block_manager.allocate(seq)
+                self.block_manager.allocate(seq, disable_prefix_cache=self.is_hybrid)
+            # Allocate state slot if needed
+            if self.state_slot_manager is not None and seq.state_slot_id == -1:
+                seq.state_slot_id = self.state_slot_manager.allocate()
             seq.num_scheduled_tokens = min(num_tokens, remaining)
             if seq.num_scheduled_tokens == num_tokens:
                 seq.status = SequenceStatus.RUNNING
@@ -66,6 +91,10 @@ class Scheduler:
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
         self.block_manager.deallocate(seq)
+        # Free state slot on preemption (state will be recomputed on re-prefill)
+        if self.state_slot_manager is not None and seq.state_slot_id != -1:
+            self.state_slot_manager.deallocate(seq.state_slot_id)
+            seq.state_slot_id = -1
         self.waiting.appendleft(seq)
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
@@ -81,4 +110,7 @@ class Scheduler:
             if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
                 self.block_manager.deallocate(seq)
+                if self.state_slot_manager is not None and seq.state_slot_id != -1:
+                    self.state_slot_manager.deallocate(seq.state_slot_id)
+                    seq.state_slot_id = -1
                 self.running.remove(seq)
